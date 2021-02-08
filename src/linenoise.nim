@@ -84,15 +84,25 @@ var
   history_max_len = LINENOISE_DEFAULT_HISTORY_MAX_LEN
   history: seq[string]
 
-const isDebugging = true
-var lnDebugFile: File
+const isDebugging = false
 when isDebugging:
-  lnDebugFile = open("/home/deodex/lndebug.txt", fmReadWrite)
+  var lnDebugFile: File
 # Debugging template.
-template lnDebug(args: varargs[string, `$`]) =
+template lnDebug(args: varargs[string, `$`]) {.dirty.} =
   when isDebugging:
-    lnDebugFile.write(args.join(", "))
-    lnDebugFile.write("\n")
+    if lnDebugFile == nil:
+      lnDebugFile = open("/tmp/lndebug.txt", fmReadWriteExisting)
+      lnDebugFile.write(
+        "[$# $# $#] p: $#, rows: $#, rpos: $#, max: $#, oldmax: $#\n".format(
+          ls[].len, ls[].pos, ls[].oldpos, plen, rows, rpos,
+          ls[].maxrows, old_rows
+        )
+      )
+
+    if args.len > 1:
+      lnDebugFile.write(", " & args[0].format(args[1..^1]))
+    else:
+      lnDebugFile.write(args[0])
     lnDebugFile.flushFile()
 
 proc maskModeEnable* {.deprecated.} =
@@ -170,7 +180,7 @@ proc getCursorPosition(inFile, outFile: File): int =
   var i: int = 0
 
   # Report cursor location
-  if outFile.writeChars("\x1b[6n", 0, 4) != 4: return -1
+  if outFile.writeChars("\e[6n", 0, 4) != 4: return -1
 
   # Read the response: ESC [ rows  cols R
   while (i < sizeof(buf)-1):
@@ -203,13 +213,13 @@ proc getColumns(inFile, outFile: File): int =
     if (start == -1): failed
 
     #  Go to right margin and get position.
-    if (outFile.writeChars("\x1b[999C", 0, 6) != 6): failed
+    if (outFile.writeChars("\e[999C", 0, 6) != 6): failed
     cols = getCursorPosition(inFile, outFile)
     if (cols == -1): failed
 
     #  Restore position.
     if (cols > start):
-      var sq = "\x1b[$#D" % $(cols-start)
+      var sq = "\e[$#D" % $(cols-start)
       if (outFile.writeChars(sq, 0, sq.len) == -1):
         #  Can't recover...
         discard
@@ -221,7 +231,7 @@ proc getColumns(inFile, outFile: File): int =
 
 template clearScreen* =
   ## Clear the screen. Used to handle ctrl+l
-  stdout.write("\x1b[H\x1b[2J")
+  stdout.write("\e[H\e[2J")
 
 template beep* =
   ## Beep, used for completion when there is nothing to complete or when all
@@ -361,9 +371,9 @@ proc refreshSingleLine(ls) =
   # Show hints if any.
   refreshShowHints(toWrite, ls, ls[].prompt.len)
   # Erase to right
-  toWrite.add("\x1b[0K")
+  toWrite.add("\e[0K")
   # Move cursor to original position.
-  toWrite.add("\r\x1b[$#C" % $(ls[].pos+ls[].prompt.len))
+  toWrite.add("\r\e[$#C" % $(ls[].pos+ls[].prompt.len))
   ls[].ofd.write(toWrite)
 
 proc refreshMultiLine(ls) =
@@ -374,12 +384,13 @@ proc refreshMultiLine(ls) =
   # FIXME: doesn't work properly
   var
     plen: int = ls[].prompt.len
-    rows: int = (plen+ls[].buf.len+ls[].cols-1) div ls[].cols # rows used by current buf.
-    rpos: int = (plen+ls[].oldpos+ls[].cols) div ls[].cols # cursor relative row.
+    rows: int = (plen + ls[].buf.len + ls[].cols - 1) div ls[].cols # rows used by current buf.
+    rpos: int = (plen + ls[].oldpos + ls[].cols) div ls[].cols # cursor relative row.
     rpos2: int # rpos after refresh.
     col: int   # colum position, zero-based.
     old_rows: int = ls[].maxrows
     fd = ls[].ofd
+    j: int
 
   # Update maxrows if needed.
   if (rows > ls[].maxrows):
@@ -389,17 +400,17 @@ proc refreshMultiLine(ls) =
   # going to the last row.
   var s = ""
   if (old_rows-rpos > 0):
-    lnDebug("go down $#" % $(old_rows-rpos))
-    s.add("\x1b[%dB" % $(old_rows-rpos))
+    lnDebug("go down $#", old_rows-rpos)
+    s.add("\e[$#B" % $(old_rows-rpos))
 
   # Now for every row clear it, go up.
   for j in 0..<old_rows-1: # -1 is intentional
     lnDebug("clear+up")
-    s.add("\r\x1b[0K\x1b[1A")
+    s.add("\r\e[0K\e[1A")
 
   # Clean the top line.
   lnDebug("clear")
-  s.add("\r\x1b[0K")
+  s.add("\r\e[0K")
 
   # Write the prompt and the current buffer content
   s.add(ls[].prompt)
@@ -414,27 +425,27 @@ proc refreshMultiLine(ls) =
   # If we are at the very end of the screen with our prompt, we need to
   # emit a newline and move the prompt to the first column.
   if (ls[].pos != 0 and ls[].pos == ls[].buf.len and
-      (ls[].pos+plen) mod ls[].cols == 0):
+      (ls[].pos + plen) mod ls[].cols == 0):
     lnDebug("<newline>")
     s.add("\n\r")
     inc rows
-    if (rows > (int)ls[].maxrows):
+    if (rows > ls[].maxrows):
       ls[].maxrows = rows
 
   # Move cursor to right position.
-  rpos2 = (plen+ls[].pos+ls[].cols) div ls[].cols # current cursor relative row.
-  lnDebug("rpos2 $#" % $rpos2)
+  rpos2 = (plen + ls[].pos + ls[].cols) div ls[].cols # current cursor relative row.
+  lnDebug("rpos2 $#", rpos2)
 
   # Go up till we reach the expected positon.
-  if (rows-rpos2 > 0):
-    lnDebug("go-up $#" % $(rows-rpos2))
-    s.add("\x1b[%dA" % $(rows-rpos2))
+  if (rows - rpos2 > 0):
+    lnDebug("go-up $#", rows-rpos2)
+    s.add("\e[$#A" % $(rows-rpos2))
 
   # Set column.
-  col = (plen+(int)ls[].pos) mod (int)ls[].cols
-  lnDebug("set col $#" % $(1+col))
+  col = (plen + ls[].pos) mod ls[].cols
+  lnDebug("set col $#", 1+col)
   if (col != 0):
-    s.add("\r\x1b[$#C" % $col)
+    s.add("\r\e[$#C" % $col)
   else:
     s.add("\r")
 
@@ -727,8 +738,13 @@ proc printKeyCodes* =
                            # on the right.
     if quit == "quit": break
 
-    echo "'$#' %02x (%d) (type quit to exit)\n" % [if c in {
-        '\x20'..'\x7E'}: $c else: "?", c.int.toHex, $c.int]
+    echo "'$#' $# ($#) (type quit to exit)\n" % [
+      if c in {'\x20'..'\x7E'}:
+        $c 
+      else:
+        "?",
+      c.int.toHex, $c.int
+    ]
     echo "\r" # Go left edge manually, we are in raw mode.
     stdout.flushFile()
 
@@ -751,7 +767,7 @@ proc noTTY: string =
   return stdin.readLine()
 
 
-proc readLine*(prompt: string): string =
+proc linenoise*(prompt: string): string =
   ## The high level function that is the main API of the linenoise library.
   ## This function checks if the terminal has basic capabilities, just checking
   ## for a blacklist of stupid terminals, and later either calls the line

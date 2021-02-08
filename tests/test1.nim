@@ -5,8 +5,10 @@ suite "basic functionality":
 
   test "single line mode":
     while true:
-      let line = readLine("test>")
+      let line = linenoise("test>")
       echo line
+      if line == "end":
+        break
 
   test "completions":
     proc completionCallback(buf: string): seq[string] =
@@ -17,5 +19,5 @@ suite "basic functionality":
     setCompletionCallback(completionCallback)
 
     while true:
-      let line = readLine(">>>")
+      let line = linenoise(">>>")
       echo line
